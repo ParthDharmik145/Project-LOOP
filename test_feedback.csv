@@ -1,0 +1,6 @@
+customer_name,feedback_text,source,rating
+Test User 1,Payment failed while placing my order,App,1
+Test User 2,The delivery was very fast and excellent,Website,5
+Test User 3,My refund has not arrived yet,Email,2
+Test User 4,The application crashes when I open orders,App,1
+Test User 5,The product quality is excellent,Website,5
