@@ -45,3 +45,5 @@ Thumbs.db
 
 # Uploads / generated files
 uploads/
+# Database backups
+*.sql
