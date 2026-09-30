@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
@@ -11,276 +12,784 @@ from sqlalchemy.orm import Session
 
 from database import SessionLocal
 
-router = APIRouter(prefix="/auth", tags=["Authentication"])
 
-# IMPORTANT: move this to an environment variable before production deployment.
-SECRET_KEY = "LOOP_AI_CHANGE_THIS_SECRET_IN_PRODUCTION"
+# =========================================================
+# ROUTER
+# =========================================================
+
+router = APIRouter(
+    prefix="/auth",
+    tags=["Authentication"]
+)
+
+
+# =========================================================
+# CONFIGURATION
+# =========================================================
+
+SECRET_KEY = os.getenv(
+    "SECRET_KEY",
+    "LOOP_AI_CHANGE_THIS_SECRET_IN_DEVELOPMENT"
+)
+
 ALGORITHM = "HS256"
+
 ACCESS_TOKEN_EXPIRE_HOURS = 8
 
+
+# =========================================================
+# PASSWORD HASHING
+# =========================================================
+
 password_hash = PasswordHash.recommended()
-bearer_scheme = HTTPBearer(auto_error=False)
-
-ALLOWED_ROLES = {"Admin", "Manager", "Analyst", "Product Manager", "Support Agent", "Viewer"}
 
 
-class RegisterRequest(BaseModel):
-    full_name: str = Field(min_length=2, max_length=100)
-    email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
-    role: str = "Analyst"
+# =========================================================
+# AUTHENTICATION SCHEME
+# =========================================================
+
+security = HTTPBearer()
 
 
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
+# =========================================================
+# ALLOWED ROLES
+# =========================================================
+
+ALLOWED_ROLES = {
+    "Admin",
+    "Manager",
+    "Analyst",
+    "Product Manager",
+    "Support Agent",
+    "Viewer",
+}
 
 
-class RoleUpdateRequest(BaseModel):
-    role: str
-
+# =========================================================
+# DATABASE DEPENDENCY
+# =========================================================
 
 def get_db():
     db = SessionLocal()
+
     try:
         yield db
     finally:
         db.close()
 
 
+# =========================================================
+# REQUEST / RESPONSE MODELS
+# =========================================================
+
+class RegisterRequest(BaseModel):
+    full_name: str = Field(
+        ...,
+        min_length=2,
+        max_length=100
+    )
+
+    email: EmailStr
+
+    password: str = Field(
+        ...,
+        min_length=8,
+        max_length=128
+    )
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+
+    password: str = Field(
+        ...,
+        min_length=1,
+        max_length=128
+    )
+
+
+class RoleUpdateRequest(BaseModel):
+    role: str
+
+
+# =========================================================
+# PASSWORD FUNCTIONS
+# =========================================================
+
 def hash_password(password: str) -> str:
+    """
+    Hash a plain-text password securely.
+    """
     return password_hash.hash(password)
 
 
-def verify_password(password: str, password_hash_value: str) -> bool:
-    return password_hash.verify(password, password_hash_value)
+def verify_password(
+    plain_password: str,
+    hashed_password: str
+) -> bool:
+    """
+    Verify a plain-text password against its stored hash.
+    """
+    try:
+        return password_hash.verify(
+            plain_password,
+            hashed_password
+        )
+    except Exception:
+        return False
 
 
-def create_access_token(user_id: int, email: str, role: str) -> str:
-    now = datetime.now(timezone.utc)
-    expires = now + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
+# =========================================================
+# JWT FUNCTIONS
+# =========================================================
+
+def create_access_token(
+    user_id: int,
+    email: str,
+    role: str
+) -> str:
+    """
+    Create a JWT access token.
+    """
+
+    expire = datetime.now(timezone.utc) + timedelta(
+        hours=ACCESS_TOKEN_EXPIRE_HOURS
+    )
 
     payload = {
         "sub": str(user_id),
         "email": email,
         "role": role,
-        "iat": now,
-        "exp": expires,
+        "exp": expire,
     }
 
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+    token = jwt.encode(
+        payload,
+        SECRET_KEY,
+        algorithm=ALGORITHM
+    )
+
+    return token
 
 
 def decode_access_token(token: str) -> dict:
+    """
+    Decode and validate a JWT token.
+    """
+
     try:
-        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-    except jwt.PyJWTError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication token.",
-            headers={"WWW-Authenticate": "Bearer"},
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,
+            algorithms=[ALGORITHM]
         )
 
+        return payload
+
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication token has expired."
+        )
+
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token."
+        )
+
+
+# =========================================================
+# CURRENT USER
+# =========================================================
 
 def get_current_user(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
-    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
 ):
-    if credentials is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    """
+    Get the currently authenticated user.
 
-    payload = decode_access_token(credentials.credentials)
+    The frontend must send:
+
+    Authorization: Bearer <JWT_TOKEN>
+    """
+
+    token = credentials.credentials
+
+    payload = decode_access_token(token)
+
     user_id = payload.get("sub")
 
     if not user_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication token.",
-            headers={"WWW-Authenticate": "Bearer"},
+            detail="Invalid authentication token."
+        )
+
+    try:
+        user_id = int(user_id)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid user identity in token."
         )
 
     user = db.execute(
-        text("""
-            SELECT id, full_name, email, role, is_active, created_at
+        text(
+            """
+            SELECT
+                id,
+                full_name,
+                email,
+                role,
+                is_active,
+                created_at
             FROM users
-            WHERE id = :id
+            WHERE id = :user_id
             LIMIT 1
-        """),
-        {"id": int(user_id)},
-    ).mappings().first()
-
-    if not user or not user["is_active"]:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User account is inactive or does not exist.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    return dict(user)
-
-
-def require_roles(*allowed_roles: str) -> Callable:
-    allowed = set(allowed_roles)
-
-    def dependency(current_user=Depends(get_current_user)):
-        if current_user.get("role") not in allowed:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not have permission to perform this action.",
-            )
-        return current_user
-
-    return dependency
-
-
-@router.post("/register")
-def register(request: RegisterRequest, db: Session = Depends(get_db)):
-    # Public registration creates Analyst accounts only.
-    # Admin can promote an account later through the protected user-management endpoint.
-    requested_role = "Analyst"
-
-    existing = db.execute(
-        text("SELECT id FROM users WHERE email = :email LIMIT 1"),
-        {"email": request.email.lower()},
-    ).first()
-
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="An account with this email already exists.",
-        )
-
-    result = db.execute(
-        text("""
-            INSERT INTO users (full_name, email, password_hash, role, is_active)
-            VALUES (:full_name, :email, :password_hash, :role, TRUE)
-        """),
+            """
+        ),
         {
-            "full_name": request.full_name.strip(),
-            "email": request.email.lower(),
-            "password_hash": hash_password(request.password),
-            "role": requested_role,
-        },
-    )
-    db.commit()
-
-    return {
-        "message": "Registration successful.",
-        "user": {
-            "id": result.lastrowid,
-            "full_name": request.full_name.strip(),
-            "email": request.email.lower(),
-            "role": requested_role,
-            "is_active": True,
-        },
-    }
-
-
-@router.post("/login")
-def login(request: LoginRequest, db: Session = Depends(get_db)):
-    user = db.execute(
-        text("""
-            SELECT id, full_name, email, password_hash, role, is_active, created_at
-            FROM users
-            WHERE email = :email
-            LIMIT 1
-        """),
-        {"email": request.email.lower()},
+            "user_id": user_id
+        }
     ).mappings().first()
 
-    if not user or not verify_password(request.password, user["password_hash"]):
+    if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password.",
-            headers={"WWW-Authenticate": "Bearer"},
+            detail="User account not found."
         )
 
     if not user["is_active"]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="This account is inactive. Contact an administrator.",
+            detail="This user account is inactive."
         )
 
-    token = create_access_token(user["id"], user["email"], user["role"])
+    return dict(user)
+
+
+# =========================================================
+# ROLE DEPENDENCY
+# =========================================================
+
+def require_roles(*allowed_roles: str) -> Callable:
+    """
+    Restrict an endpoint to specific roles.
+    """
+
+    def role_checker(
+        current_user: dict = Depends(get_current_user)
+    ):
+        current_role = current_user.get("role")
+
+        if current_role not in allowed_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to perform this action."
+            )
+
+        return current_user
+
+    return role_checker
+
+
+# =========================================================
+# REGISTER
+# =========================================================
+
+@router.post("/register")
+def register(
+    request: RegisterRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Register a new user.
+
+    Public registration always creates an Analyst account.
+    Admin can later change the role from Team & Access.
+    """
+
+    email = request.email.strip().lower()
+
+    # -----------------------------------------------------
+    # Validate email uniqueness
+    # -----------------------------------------------------
+
+    existing_user = db.execute(
+        text(
+            """
+            SELECT id
+            FROM users
+            WHERE LOWER(email) = :email
+            LIMIT 1
+            """
+        ),
+        {
+            "email": email
+        }
+    ).first()
+
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An account with this email already exists."
+        )
+
+    # -----------------------------------------------------
+    # Validate password length
+    # -----------------------------------------------------
+
+    if len(request.password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must contain at least 8 characters."
+        )
+
+    # -----------------------------------------------------
+    # Hash password
+    # -----------------------------------------------------
+
+    hashed_password = hash_password(
+        request.password
+    )
+
+    # -----------------------------------------------------
+    # Public registration role
+    # -----------------------------------------------------
+
+    role = "Analyst"
+
+    # -----------------------------------------------------
+    # Insert user
+    # -----------------------------------------------------
+
+    result = db.execute(
+        text(
+            """
+            INSERT INTO users
+            (
+                full_name,
+                email,
+                password_hash,
+                role,
+                is_active
+            )
+            VALUES
+            (
+                :full_name,
+                :email,
+                :password_hash,
+                :role,
+                TRUE
+            )
+            """
+        ),
+        {
+            "full_name": request.full_name.strip(),
+            "email": email,
+            "password_hash": hashed_password,
+            "role": role,
+        }
+    )
+
+    db.commit()
+
+    user_id = result.lastrowid
+
+    return {
+        "message": "User registered successfully.",
+        "user": {
+            "id": user_id,
+            "full_name": request.full_name.strip(),
+            "email": email,
+            "role": role,
+            "is_active": True,
+        }
+    }
+
+
+# =========================================================
+# LOGIN
+# =========================================================
+
+@router.post("/login")
+def login(
+    request: LoginRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Authenticate a user and return a JWT token.
+    """
+
+    email = request.email.strip().lower()
+
+    user = db.execute(
+        text(
+            """
+            SELECT
+                id,
+                full_name,
+                email,
+                password_hash,
+                role,
+                is_active,
+                created_at
+            FROM users
+            WHERE LOWER(email) = :email
+            LIMIT 1
+            """
+        ),
+        {
+            "email": email
+        }
+    ).mappings().first()
+
+    # -----------------------------------------------------
+    # User not found
+    # -----------------------------------------------------
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password."
+        )
+
+    # -----------------------------------------------------
+    # Account disabled
+    # -----------------------------------------------------
+
+    if not user["is_active"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This user account is inactive."
+        )
+
+    # -----------------------------------------------------
+    # Verify password
+    # -----------------------------------------------------
+
+    if not verify_password(
+        request.password,
+        user["password_hash"]
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password."
+        )
+
+    # -----------------------------------------------------
+    # Create JWT
+    # -----------------------------------------------------
+
+    access_token = create_access_token(
+        user_id=user["id"],
+        email=user["email"],
+        role=user["role"]
+    )
+
+    # -----------------------------------------------------
+    # Return authenticated user
+    # -----------------------------------------------------
 
     return {
         "message": "Login successful.",
-        "access_token": token,
+        "access_token": access_token,
         "token_type": "bearer",
-        "expires_in": ACCESS_TOKEN_EXPIRE_HOURS * 60 * 60,
+        "expires_in_hours": ACCESS_TOKEN_EXPIRE_HOURS,
         "user": {
             "id": user["id"],
             "full_name": user["full_name"],
             "email": user["email"],
             "role": user["role"],
-            "is_active": user["is_active"],
+            "is_active": bool(user["is_active"]),
             "created_at": user["created_at"],
-        },
+        }
     }
 
 
+# =========================================================
+# CURRENT USER
+# =========================================================
+
 @router.get("/me")
-def me(current_user=Depends(get_current_user)):
+def get_me(
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Return the currently authenticated user's information.
+    """
+
     return current_user
 
 
-@router.post("/logout")
-def logout(current_user=Depends(get_current_user)):
-    # JWT access tokens are stateless. The frontend removes the token on logout.
-    return {"message": "Logout successful.", "user": current_user["email"]}
+# =========================================================
+# LOGOUT
+# =========================================================
 
+@router.post("/logout")
+def logout(
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Logout endpoint.
+
+    JWT tokens are stateless, so the frontend removes the
+    token from localStorage after this request.
+
+    A token naturally expires after ACCESS_TOKEN_EXPIRE_HOURS.
+    """
+
+    return {
+        "message": "Logout successful.",
+        "user_id": current_user["id"]
+    }
+
+
+# =========================================================
+# GET ALL USERS
+# =========================================================
 
 @router.get("/users")
-def list_users(
-    current_user=Depends(require_roles("Admin")),
-    db: Session = Depends(get_db),
+def get_users(
+    current_user: dict = Depends(
+        require_roles("Admin")
+    ),
+    db: Session = Depends(get_db)
 ):
+    """
+    Return all users.
+
+    Admin only.
+    """
+
     users = db.execute(
-        text("""
-            SELECT id, full_name, email, role, is_active, created_at
+        text(
+            """
+            SELECT
+                id,
+                full_name,
+                email,
+                role,
+                is_active,
+                created_at
             FROM users
-            ORDER BY created_at DESC
-        """)
+            ORDER BY id ASC
+            """
+        )
     ).mappings().all()
 
-    return [dict(user) for user in users]
+    return [
+        {
+            "id": user["id"],
+            "full_name": user["full_name"],
+            "email": user["email"],
+            "role": user["role"],
+            "is_active": bool(user["is_active"]),
+            "created_at": user["created_at"],
+        }
+        for user in users
+    ]
 
+
+# =========================================================
+# UPDATE USER ROLE
+# =========================================================
 
 @router.patch("/users/{user_id}/role")
 def update_user_role(
     user_id: int,
     request: RoleUpdateRequest,
-    current_user=Depends(require_roles("Admin")),
-    db: Session = Depends(get_db),
+    current_user: dict = Depends(
+        require_roles("Admin")
+    ),
+    db: Session = Depends(get_db)
 ):
-    role = request.role.strip().title()
+    """
+    Change another user's role.
 
-    if role not in ALLOWED_ROLES:
+    Admin only.
+
+    The currently logged-in Admin cannot change their own
+    role through this endpoint.
+    """
+
+    new_role = request.role.strip()
+
+    # -----------------------------------------------------
+    # Validate role
+    # -----------------------------------------------------
+
+    if new_role not in ALLOWED_ROLES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Role must be Admin, Manager, Analyst, Product Manager, Support Agent or Viewer.",
+            detail=(
+                "Invalid role. Allowed roles are: "
+                + ", ".join(sorted(ALLOWED_ROLES))
+            )
         )
 
-    if user_id == current_user["id"] and role != "Admin":
+    # -----------------------------------------------------
+    # Prevent Admin from changing their own role
+    # -----------------------------------------------------
+
+    if int(current_user["id"]) == int(user_id):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="The current Admin cannot remove their own Admin role.",
+            detail="You cannot change your own role."
         )
 
-    result = db.execute(
-        text("UPDATE users SET role = :role WHERE id = :id"),
-        {"role": role, "id": user_id},
-    )
+    # -----------------------------------------------------
+    # Check target user
+    # -----------------------------------------------------
 
-    if result.rowcount == 0:
+    target_user = db.execute(
+        text(
+            """
+            SELECT
+                id,
+                full_name,
+                email,
+                role,
+                is_active
+            FROM users
+            WHERE id = :user_id
+            LIMIT 1
+            """
+        ),
+        {
+            "user_id": user_id
+        }
+    ).mappings().first()
+
+    if not target_user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found.",
+            detail="User not found."
         )
 
+    # -----------------------------------------------------
+    # Update role
+    # -----------------------------------------------------
+
+    db.execute(
+        text(
+            """
+            UPDATE users
+            SET role = :role
+            WHERE id = :user_id
+            """
+        ),
+        {
+            "role": new_role,
+            "user_id": user_id
+        }
+    )
+
     db.commit()
-    return {"message": "User role updated successfully.", "user_id": user_id, "role": role}
+
+    return {
+        "message": "User role updated successfully.",
+        "user": {
+            "id": target_user["id"],
+            "full_name": target_user["full_name"],
+            "email": target_user["email"],
+            "previous_role": target_user["role"],
+            "role": new_role,
+            "is_active": bool(target_user["is_active"]),
+        }
+    }
+
+
+# =========================================================
+# ACTIVATE / DEACTIVATE USER
+# =========================================================
+
+@router.patch("/users/{user_id}/status")
+def update_user_status(
+    user_id: int,
+    current_user: dict = Depends(
+        require_roles("Admin")
+    ),
+    db: Session = Depends(get_db)
+):
+    """
+    Toggle another user's active/inactive status.
+
+    Admin only.
+    """
+
+    # -----------------------------------------------------
+    # Prevent Admin from disabling themselves
+    # -----------------------------------------------------
+
+    if int(current_user["id"]) == int(user_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot change your own account status."
+        )
+
+    # -----------------------------------------------------
+    # Get target user
+    # -----------------------------------------------------
+
+    target_user = db.execute(
+        text(
+            """
+            SELECT
+                id,
+                full_name,
+                email,
+                role,
+                is_active
+            FROM users
+            WHERE id = :user_id
+            LIMIT 1
+            """
+        ),
+        {
+            "user_id": user_id
+        }
+    ).mappings().first()
+
+    if not target_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found."
+        )
+
+    new_status = not bool(
+        target_user["is_active"]
+    )
+
+    # -----------------------------------------------------
+    # Update status
+    # -----------------------------------------------------
+
+    db.execute(
+        text(
+            """
+            UPDATE users
+            SET is_active = :is_active
+            WHERE id = :user_id
+            """
+        ),
+        {
+            "is_active": new_status,
+            "user_id": user_id
+        }
+    )
+
+    db.commit()
+
+    return {
+        "message": "User status updated successfully.",
+        "user": {
+            "id": target_user["id"],
+            "full_name": target_user["full_name"],
+            "email": target_user["email"],
+            "role": target_user["role"],
+            "is_active": new_status,
+        }
+    }
