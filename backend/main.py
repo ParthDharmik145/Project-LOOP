@@ -1,3 +1,4 @@
+import os
 from collections import Counter
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -43,23 +44,33 @@ app.include_router(auth_router)
 # CORS
 # ============================================================
 
+FRONTEND_URL = os.getenv("FRONTEND_URL", "")
+
+allowed_origins = [
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:5175",
+    "http://localhost:5176",
+    "http://localhost:5177",
+    "http://localhost:5178",
+
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
+    "http://127.0.0.1:5175",
+    "http://127.0.0.1:5176",
+    "http://127.0.0.1:5177",
+    "http://127.0.0.1:5178",
+]
+
+# Production frontend (Vercel). Several URLs can be separated by commas.
+for origin in FRONTEND_URL.split(","):
+    origin = origin.strip().rstrip("/")
+    if origin and origin not in allowed_origins:
+        allowed_origins.append(origin)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:5174",
-        "http://localhost:5175",
-        "http://localhost:5176",
-        "http://localhost:5177",
-        "http://localhost:5178",
-
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:5174",
-        "http://127.0.0.1:5175",
-        "http://127.0.0.1:5176",
-        "http://127.0.0.1:5177",
-        "http://127.0.0.1:5178",
-    ],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
