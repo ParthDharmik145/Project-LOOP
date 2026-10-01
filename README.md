@@ -43,7 +43,16 @@ A dedicated **Viewer Demo Login** is available for evaluation.
 
 > **Security note:** Administrative, Manager, Analyst, database, and production credentials are intentionally not published in this repository.
 
-## 💡 Why LOOP?
+
+The following accounts are available for evaluating the role-based access control (RBAC) functionality of the deployed application.
+
+| Role | Email | Password |
+|---|---|---|
+| **Admin** | `admin@loopai.com` | `Admin@12345` |
+| **Manager** | `manager@loopai.com` | `AdminM@12345` |
+| **Analyst** | `demo.analyst@loopai.com` | `AdminA@12345` |
+
+> **Security note:** These credentials are intended only for project demonstration and evaluation. Do not use production, database, API-secret, or personal credentials in the repository.
 
 **LOOP = Listen → Organize → Understand → Prioritize → Act**
 
