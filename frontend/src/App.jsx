@@ -36,6 +36,7 @@ import {
   EyeOff,
   ArrowRight,
   ShieldCheck,
+  Trash2,
 } from "lucide-react";
 
 import {
@@ -68,6 +69,7 @@ if (storedLoopToken) {
 function App() {
   const [activePage, setActivePage] = useState("dashboard");
   const [darkMode, setDarkMode] = useState(false);
+  const [showLanding, setShowLanding] = useState(true);
 
   const [authUser, setAuthUser] = useState(() => {
     try {
@@ -123,6 +125,22 @@ function App() {
 
   const [copilotHistory, setCopilotHistory] =
     useState([]);
+
+  /* =========================================================
+     REPORT PERIOD
+  ========================================================= */
+
+  const [reportMode, setReportMode] =
+    useState("month");
+
+  const [selectedReportMonth, setSelectedReportMonth] =
+    useState("");
+
+  const [reportStartDate, setReportStartDate] =
+    useState("");
+
+  const [reportEndDate, setReportEndDate] =
+    useState("");
 
   /* =========================================================
      BULK IMPORT
@@ -407,6 +425,24 @@ function App() {
     await loadData(user);
   };
 
+  const handleDemoLogin = async (role) => {
+    const response = await axios.post(`${API_URL}/auth/demo-login`, { role });
+
+    const token = response.data.access_token;
+    const user = response.data.user;
+
+    localStorage.setItem("loop-access-token", token);
+    localStorage.setItem("loop-user", JSON.stringify(user));
+    axios.defaults.headers.common.Authorization = `Bearer ${token}`;
+
+    setAuthUser(user);
+    setShowLanding(false);
+    setAuthChecking(false);
+    setLoading(true);
+
+    await loadData(user);
+  };
+
   const handleLogout = async () => {
     try {
       if (authUser) {
@@ -508,6 +544,35 @@ function App() {
     await loadData();
 
     setRefreshing(false);
+  };
+
+  const handleDeleteFeedback = async (feedbackId) => {
+    if (!canManageData) return;
+
+    const confirmed = window.confirm(
+      "Delete this feedback? This action cannot be undone."
+    );
+
+    if (!confirmed) return;
+
+    try {
+      await axios.delete(`${API_URL}/feedback/${feedbackId}`);
+
+      addActivityNotification({
+        type: "success",
+        title: "Feedback deleted",
+        message: `Feedback #${feedbackId} was permanently deleted.`,
+        page: "feedback",
+      });
+
+      await loadData();
+    } catch (err) {
+      console.error(err);
+      setError(
+        err.response?.data?.detail ||
+          "Unable to delete this feedback record."
+      );
+    }
   };
 
   /* =========================================================
@@ -997,6 +1062,133 @@ function App() {
     );
 
   /* =========================================================
+     REPORT PERIOD + PERIOD-SPECIFIC INTELLIGENCE
+  ========================================================= */
+
+  const getFeedbackDate = (item) => {
+    const value = item?.created_at || item?.createdAt || item?.date;
+    if (!value) return null;
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date;
+  };
+
+  const toMonthKey = (date) =>
+    `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+
+  const formatMonthLabel = (monthKey) => {
+    if (!monthKey) return "Select month";
+    const [year, month] = monthKey.split("-").map(Number);
+    return new Date(year, month - 1, 1).toLocaleDateString(undefined, {
+      month: "long",
+      year: "numeric",
+    });
+  };
+
+  const availableReportMonths = useMemo(() => {
+    const months = new Set();
+    feedback.forEach((item) => {
+      const date = getFeedbackDate(item);
+      if (date) months.add(toMonthKey(date));
+    });
+    return Array.from(months).sort((a, b) => b.localeCompare(a));
+  }, [feedback]);
+
+  useEffect(() => {
+    if (!availableReportMonths.length) return;
+    setSelectedReportMonth((current) =>
+      current && availableReportMonths.includes(current)
+        ? current
+        : availableReportMonths[0]
+    );
+  }, [availableReportMonths]);
+
+  const reportPeriod = useMemo(() => {
+    let start = null;
+    let end = null;
+    let label = "All available feedback";
+
+    if (reportMode === "month" && selectedReportMonth) {
+      const [year, month] = selectedReportMonth.split("-").map(Number);
+      start = new Date(year, month - 1, 1);
+      end = new Date(year, month, 1);
+      label = formatMonthLabel(selectedReportMonth);
+    }
+
+    if (reportMode === "custom" && reportStartDate) {
+      start = new Date(`${reportStartDate}T00:00:00`);
+      if (reportEndDate) {
+        end = new Date(`${reportEndDate}T00:00:00`);
+        end.setDate(end.getDate() + 1);
+      } else {
+        end = new Date();
+        end.setDate(end.getDate() + 1);
+      }
+      label = reportEndDate
+        ? `${new Date(`${reportStartDate}T00:00:00`).toLocaleDateString()} – ${new Date(`${reportEndDate}T00:00:00`).toLocaleDateString()}`
+        : `From ${new Date(`${reportStartDate}T00:00:00`).toLocaleDateString()}`;
+    }
+
+    const hasCustomPeriod =
+      reportMode !== "custom" || Boolean(reportStartDate);
+
+    const filtered = hasCustomPeriod
+      ? feedback.filter((item) => {
+          const date = getFeedbackDate(item);
+          if (!date) return false;
+          if (start && date < start) return false;
+          if (end && date >= end) return false;
+          return true;
+        })
+      : [];
+
+    const periodLength = start && end ? end.getTime() - start.getTime() : 0;
+    const previousStart = periodLength ? new Date(start.getTime() - periodLength) : null;
+    const previousEnd = start;
+
+    const previousFeedback = previousStart && previousEnd
+      ? feedback.filter((item) => {
+          const date = getFeedbackDate(item);
+          return date && date >= previousStart && date < previousEnd;
+        })
+      : [];
+
+    const positive = filtered.filter((item) => String(item.sentiment || "").toLowerCase() === "positive").length;
+    const negative = filtered.filter((item) => String(item.sentiment || "").toLowerCase() === "negative").length;
+    const neutral = filtered.filter((item) => String(item.sentiment || "").toLowerCase() === "neutral").length;
+    const critical = filtered.filter((item) => String(item.priority || "").toLowerCase() === "critical").length;
+
+    const issueCounts = {};
+    filtered.forEach((item) => {
+      const issue = item.issue || item.topic || "General";
+      issueCounts[issue] = (issueCounts[issue] || 0) + 1;
+    });
+
+    const sortedIssues = Object.entries(issueCounts).sort((a, b) => b[1] - a[1]);
+    const total = filtered.length;
+    const previousTotal = previousFeedback.length;
+    const changePercentage = previousTotal > 0
+      ? Math.round(((total - previousTotal) / previousTotal) * 100)
+      : total > 0 ? 100 : 0;
+
+    return {
+      label,
+      filtered,
+      previousFeedback,
+      total,
+      positive,
+      negative,
+      neutral,
+      critical,
+      positivePercentage: total ? Math.round((positive / total) * 100) : 0,
+      negativePercentage: total ? Math.round((negative / total) * 100) : 0,
+      neutralPercentage: total ? Math.round((neutral / total) * 100) : 0,
+      topIssue: sortedIssues[0]?.[0] || "No major issue detected",
+      topIssueCount: sortedIssues[0]?.[1] || 0,
+      changePercentage,
+    };
+  }, [feedback, reportMode, selectedReportMonth, reportStartDate, reportEndDate]);
+
+  /* =========================================================
      ISSUE MODAL
   ========================================================= */
 
@@ -1013,111 +1205,55 @@ function App() {
   ========================================================= */
 
   const downloadReport = () => {
-    const emergingIssue =
-      trends?.emerging_issue;
-
     const report = `
 LOOP AI — CUSTOMER INTELLIGENCE REPORT
 ======================================
 
+Report Period: ${reportPeriod.label}
 Generated: ${new Date().toLocaleString()}
 
 EXECUTIVE SUMMARY
 -----------------
-${
-  analytics?.summary ||
-  "No summary available."
-}
+This report contains ${reportPeriod.total} customer feedback record(s) for the selected reporting period.
 
 KEY METRICS
 -----------
-Total Feedback: ${totalFeedback}
-Positive Feedback: ${positiveCount}
-Negative Feedback: ${negativeCount}
-Neutral Feedback: ${neutralCount}
-Critical Issues: ${criticalIssues}
+Total Feedback: ${reportPeriod.total}
+Positive Feedback: ${reportPeriod.positive} (${reportPeriod.positivePercentage}%)
+Negative Feedback: ${reportPeriod.negative} (${reportPeriod.negativePercentage}%)
+Neutral Feedback: ${reportPeriod.neutral} (${reportPeriod.neutralPercentage}%)
+Critical Issues: ${reportPeriod.critical}
+
+PERIOD COMPARISON
+-----------------
+Previous Period Feedback: ${reportPeriod.previousFeedback.length}
+Change vs Previous Period: ${reportPeriod.changePercentage >= 0 ? "+" : ""}${reportPeriod.changePercentage}%
 
 TOP ISSUE
 ---------
-${topIssue}
-Occurrences: ${topIssueCount}
-
-TREND INTELLIGENCE
-------------------
-Recent Feedback: ${
-      trends?.analysis_period
-        ?.recent_feedback_count ||
-      0
-    }
-
-Previous Period Feedback: ${
-      trends?.analysis_period
-        ?.previous_feedback_count ||
-      0
-    }
-
-Trend Threshold: ${
-      trends?.trend_threshold_percentage ||
-      20
-    }%
-
-Emerging Issue: ${
-      emergingIssue?.name ||
-      "No emerging issue detected"
-    }
-
-Emerging Issue Occurrences: ${
-      emergingIssue?.recent_count ||
-      0
-    }
-
-SENTIMENT
----------
-Positive: ${positivePercentage}%
-Negative: ${negativePercentage}%
-Neutral: ${
-      totalFeedback
-        ? Math.round(
-            (neutralCount /
-              totalFeedback) *
-              100
-          )
-        : 0
-    }%
+${reportPeriod.topIssue}
+Occurrences: ${reportPeriod.topIssueCount}
 
 RECOMMENDED ACTION
 ------------------
-Prioritize recurring critical issues, investigate
-their underlying operational causes, and monitor
-future feedback for improvement.
+Prioritize recurring critical customer issues, investigate the most frequent complaints, and monitor future feedback for improvement.
 
 ======================================
 LOOP AI
 AI Customer Feedback Intelligence Platform
 `;
 
-    const blob =
-      new Blob([report], {
-        type: "text/plain",
-      });
-
-    const url =
-      URL.createObjectURL(
-        blob
-      );
-
-    const anchor =
-      document.createElement(
-        "a"
-      );
-
+    const blob = new Blob([report], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
     anchor.href = url;
 
-    anchor.download =
-      "LOOP-AI-Intelligence-Report.txt";
+    const safePeriod = reportPeriod.label
+      .replace(/[^a-z0-9]+/gi, "-")
+      .replace(/^-|-$/g, "");
 
+    anchor.download = `LOOP-AI-Intelligence-Report-${safePeriod || "Custom"}.txt`;
     anchor.click();
-
     URL.revokeObjectURL(url);
   };
 
@@ -1209,7 +1345,17 @@ AI Customer Feedback Intelligence Platform
   }
 
   if (!authUser) {
-    return <LoginScreen onLogin={handleLogin} />;
+    if (showLanding) {
+      return <LandingScreen onEnter={() => setShowLanding(false)} />;
+    }
+
+    return (
+      <LoginScreen
+        onLogin={handleLogin}
+        onDemoLogin={handleDemoLogin}
+        onBackToLanding={() => setShowLanding(true)}
+      />
+    );
   }
 
   /* =========================================================
@@ -1907,6 +2053,7 @@ AI Customer Feedback Intelligence Platform
               openFilePicker
             }
             canManageData={canManageData}
+            onDeleteFeedback={handleDeleteFeedback}
             importing={
               importing
             }
@@ -2000,22 +2147,19 @@ AI Customer Feedback Intelligence Platform
           "reports" && (
           <ReportsPage
             stats={stats}
-            analytics={
-              analytics
-            }
+            analytics={analytics}
             trends={trends}
-            totalFeedback={
-              totalFeedback
-            }
-            topIssue={
-              topIssue
-            }
-            topIssueCount={
-              topIssueCount
-            }
-            downloadReport={
-              downloadReport
-            }
+            reportMode={reportMode}
+            setReportMode={setReportMode}
+            selectedReportMonth={selectedReportMonth}
+            setSelectedReportMonth={setSelectedReportMonth}
+            availableReportMonths={availableReportMonths}
+            reportStartDate={reportStartDate}
+            setReportStartDate={setReportStartDate}
+            reportEndDate={reportEndDate}
+            setReportEndDate={setReportEndDate}
+            reportPeriod={reportPeriod}
+            downloadReport={downloadReport}
           />
         )}
 
@@ -2362,13 +2506,120 @@ AI Customer Feedback Intelligence Platform
   );
 }
 
-function LoginScreen({ onLogin }) {
+function LandingScreen({ onEnter }) {
+  const features = [
+    [BrainCircuit, "AI-powered analysis", "Turn raw customer comments into sentiment, topics, issues and priorities."],
+    [TrendingUp, "Trend intelligence", "Spot recurring problems and emerging customer concerns before they grow."],
+    [ShieldCheck, "Secure workspace", "Role-based access keeps operational and analytical capabilities separated."],
+    [Zap, "Action-focused insights", "Move from feedback to recommended actions with one connected intelligence workflow."],
+  ];
+
+  return (
+    <div
+      style={{
+        minHeight: "100vh",
+        background: "linear-gradient(135deg, #07111f 0%, #0d1b31 52%, #102b46 100%)",
+        color: "#f8fafc",
+        fontFamily: "Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+        overflow: "auto",
+      }}
+    >
+      <header style={{ maxWidth: 1180, margin: "0 auto", padding: "24px 28px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ width: 42, height: 42, borderRadius: 12, display: "grid", placeItems: "center", background: "linear-gradient(135deg, #38bdf8, #6366f1)", fontWeight: 900, fontSize: 22 }}>L</div>
+          <div>
+            <div style={{ fontSize: 19, fontWeight: 850, letterSpacing: "-0.02em" }}>LOOP AI</div>
+            <div style={{ fontSize: 11, color: "#94a3b8", letterSpacing: "0.08em" }}>CUSTOMER INTELLIGENCE</div>
+          </div>
+        </div>
+        <button onClick={onEnter} style={{ border: "1px solid rgba(255,255,255,.18)", background: "rgba(255,255,255,.08)", color: "#fff", borderRadius: 10, padding: "10px 17px", cursor: "pointer", fontWeight: 700 }}>Sign in</button>
+      </header>
+
+      <main>
+        <section style={{ maxWidth: 1180, margin: "0 auto", padding: "72px 28px 58px", display: "grid", gridTemplateColumns: "1.08fr .92fr", gap: 56, alignItems: "center" }}>
+          <div>
+            <div style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "7px 11px", borderRadius: 999, background: "rgba(56,189,248,.1)", border: "1px solid rgba(56,189,248,.2)", color: "#7dd3fc", fontSize: 12, fontWeight: 800, letterSpacing: ".08em" }}>
+              <CircleDot size={14} /> AI CUSTOMER FEEDBACK INTELLIGENCE
+            </div>
+            <h1 style={{ fontSize: "clamp(42px, 6vw, 72px)", lineHeight: 1.02, letterSpacing: "-0.055em", margin: "22px 0 22px", maxWidth: 720 }}>
+              Listen to customers. <span style={{ color: "#67e8f9" }}>Understand what matters.</span>
+            </h1>
+            <p style={{ maxWidth: 650, color: "#b6c4d7", fontSize: 18, lineHeight: 1.7, margin: 0 }}>
+              LOOP AI transforms customer feedback into actionable intelligence — automatically detecting sentiment, recurring issues, emerging trends and business priorities.
+            </p>
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 30 }}>
+              <button onClick={onEnter} style={{ display: "inline-flex", alignItems: "center", gap: 10, border: 0, borderRadius: 12, padding: "14px 20px", background: "linear-gradient(135deg, #38bdf8, #6366f1)", color: "white", fontWeight: 850, fontSize: 15, cursor: "pointer", boxShadow: "0 12px 35px rgba(56,189,248,.18)" }}>
+                Enter LOOP AI <ArrowRight size={18} />
+              </button>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 5px", color: "#94a3b8", fontSize: 13 }}>
+                <ShieldCheck size={17} /> Secure role-based workspace
+              </div>
+            </div>
+          </div>
+
+          <div style={{ position: "relative", minHeight: 380, borderRadius: 26, padding: 18, background: "rgba(255,255,255,.055)", border: "1px solid rgba(255,255,255,.1)", boxShadow: "0 30px 80px rgba(0,0,0,.25)" }}>
+            <div style={{ height: "100%", minHeight: 340, borderRadius: 18, background: "#0b1424", border: "1px solid rgba(255,255,255,.08)", padding: 20 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 22 }}>
+                <div><div style={{ color: "#94a3b8", fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em" }}>LOOP intelligence</div><strong style={{ fontSize: 20 }}>Customer Overview</strong></div>
+                <div style={{ color: "#67e8f9", fontSize: 12, fontWeight: 800 }}>LIVE AI</div>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10, marginBottom: 18 }}>
+                {[['Feedback','2,480'],['Positive','68%'],['Critical','12']].map(([a,b]) => <div key={a} style={{ padding: 13, borderRadius: 12, background: "rgba(255,255,255,.045)", border: "1px solid rgba(255,255,255,.06)" }}><div style={{ color: "#94a3b8", fontSize: 10 }}>{a}</div><strong style={{ display: "block", marginTop: 5, fontSize: 19 }}>{b}</strong></div>)}
+              </div>
+              <div style={{ padding: 15, borderRadius: 14, background: "rgba(56,189,248,.05)", border: "1px solid rgba(56,189,248,.12)" }}>
+                <div style={{ color: "#94a3b8", fontSize: 11, marginBottom: 14 }}>AI issue signals</div>
+                {[['Payment failures', 82], ['Delivery delays', 64], ['App performance', 48]].map(([name,value]) => <div key={name} style={{ marginBottom: 13 }}><div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 5 }}><span>{name}</span><span style={{ color: "#67e8f9" }}>{value}%</span></div><div style={{ height: 7, borderRadius: 99, background: "#1e293b", overflow: "hidden" }}><div style={{ width: `${value}%`, height: "100%", borderRadius: 99, background: "linear-gradient(90deg,#38bdf8,#818cf8)" }} /></div></div>)}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section style={{ maxWidth: 1180, margin: "0 auto", padding: "20px 28px 65px" }}>
+          <div style={{ textAlign: "center", marginBottom: 30 }}><div style={{ color: "#67e8f9", fontSize: 12, fontWeight: 850, letterSpacing: ".1em" }}>ONE CONNECTED WORKFLOW</div><h2 style={{ fontSize: 30, margin: "9px 0 0" }}>From feedback to action</h2></div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
+            {features.map(([Icon,title,text]) => <div key={title} style={{ padding: 21, borderRadius: 16, background: "rgba(255,255,255,.045)", border: "1px solid rgba(255,255,255,.08)" }}><div style={{ width: 40, height: 40, borderRadius: 11, display: "grid", placeItems: "center", background: "rgba(56,189,248,.1)", color: "#67e8f9", marginBottom: 15 }}><Icon size={20} /></div><h3 style={{ margin: "0 0 8px", fontSize: 16 }}>{title}</h3><p style={{ margin: 0, color: "#94a3b8", lineHeight: 1.6, fontSize: 13 }}>{text}</p></div>)}
+          </div>
+        </section>
+
+        <section style={{ borderTop: "1px solid rgba(255,255,255,.07)", borderBottom: "1px solid rgba(255,255,255,.07)" }}>
+          <div style={{ maxWidth: 1180, margin: "0 auto", padding: "30px 28px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 20, flexWrap: "wrap" }}>
+            <div><strong style={{ fontSize: 17 }}>Ready to explore the intelligence workspace?</strong><div style={{ color: "#94a3b8", fontSize: 13, marginTop: 5 }}>Use the evaluator role buttons on the secure sign-in screen.</div></div>
+            <button onClick={onEnter} style={{ display: "inline-flex", alignItems: "center", gap: 8, border: 0, borderRadius: 10, padding: "12px 17px", background: "#f8fafc", color: "#0f172a", fontWeight: 800, cursor: "pointer" }}>Continue <ArrowRight size={17} /></button>
+          </div>
+        </section>
+      </main>
+
+      <footer style={{ maxWidth: 1180, margin: "0 auto", padding: "24px 28px 30px", display: "flex", justifyContent: "space-between", color: "#64748b", fontSize: 12 }}>
+        <span>© 2026 LOOP AI</span><span>AI Customer Feedback Intelligence Platform</span>
+      </footer>
+    </div>
+  );
+}
+
+function LoginScreen({ onLogin, onDemoLogin, onBackToLanding }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [demoLoading, setDemoLoading] = useState("");
+
+  const demoLogin = async (role) => {
+    setError("");
+    try {
+      setDemoLoading(role);
+      await onDemoLogin(role);
+    } catch (err) {
+      console.error(err);
+      setError(
+        err.response?.data?.detail ||
+          `Unable to start the ${role} demo. Please try again.`
+      );
+    } finally {
+      setDemoLoading("");
+    }
+  };
 
   const submit = async (event) => {
     event.preventDefault();
@@ -2490,6 +2741,56 @@ function LoginScreen({ onLogin }) {
               <h2>Welcome Back</h2>
               <p>Sign in to access your LOOP AI workspace</p>
             </div>
+
+            <button
+              type="button"
+              onClick={onBackToLanding}
+              style={{
+                alignSelf: "flex-start",
+                border: "none",
+                background: "transparent",
+                color: "#64748b",
+                cursor: "pointer",
+                fontSize: "13px",
+                marginBottom: "16px",
+                padding: 0,
+              }}
+            >
+              ← Back to LOOP AI overview
+            </button>
+
+            <div style={{ marginBottom: "18px" }}>
+              <div style={{ fontSize: "12px", fontWeight: 800, letterSpacing: "0.08em", color: "#64748b", marginBottom: "8px" }}>
+                EVALUATOR ACCESS
+              </div>
+              <div style={{ fontSize: "12px", lineHeight: 1.55, color: "#64748b", marginBottom: "10px" }}>
+                Public evaluation access is limited to the read-only Viewer role. Admin, Manager and Analyst accounts must use authenticated credentials.
+              </div>
+              <button
+                type="button"
+                onClick={() => demoLogin("Viewer")}
+                disabled={Boolean(demoLoading)}
+                style={{
+                  width: "100%",
+                  border: "1px solid #dbe3ef",
+                  borderRadius: "12px",
+                  background: "#f8fafc",
+                  padding: "11px 12px",
+                  cursor: demoLoading ? "wait" : "pointer",
+                  textAlign: "left",
+                  opacity: demoLoading && demoLoading !== "Viewer" ? 0.55 : 1,
+                }}
+              >
+                <strong style={{ display: "block", color: "#172033", fontSize: "13px" }}>
+                  {demoLoading === "Viewer" ? "Opening..." : "Continue as Viewer"}
+                </strong>
+                <span style={{ display: "block", color: "#64748b", fontSize: "11px", marginTop: "2px" }}>
+                  Read-only demo access • no password required
+                </span>
+              </button>
+            </div>
+
+            <div className="loop-login-divider" style={{ marginBottom: "18px" }}><span>OR SIGN IN WITH ACCOUNT</span></div>
 
             <form onSubmit={submit} className="loop-login-form">
               <label>
@@ -4270,6 +4571,7 @@ function FeedbackPage({
   openFeedback,
   openFilePicker,
   canManageData,
+  onDeleteFeedback,
   importing,
   importMessage,
   importError,
@@ -4468,6 +4770,12 @@ function FeedbackPage({
               <th>
                 Rating
               </th>
+
+              {canManageData && (
+                <th>
+                  Action
+                </th>
+              )}
             </tr>
           </thead>
 
@@ -4563,6 +4871,23 @@ function FeedbackPage({
                       /5
                     </strong>
                   </td>
+
+                  {canManageData && (
+                    <td>
+                      <button
+                        type="button"
+                        className="delete-feedback-button"
+                        onClick={() =>
+                          onDeleteFeedback(item.id)
+                        }
+                        title="Delete feedback"
+                        aria-label={`Delete feedback ${item.id}`}
+                      >
+                        <Trash2 size={16} />
+                        Delete
+                      </button>
+                    </td>
+                  )}
                 </tr>
               )
             )}
@@ -5791,245 +6116,168 @@ function ReportsPage({
   stats,
   analytics,
   trends,
-  totalFeedback,
-  topIssue,
-  topIssueCount,
+  reportMode,
+  setReportMode,
+  selectedReportMonth,
+  setSelectedReportMonth,
+  availableReportMonths,
+  reportStartDate,
+  setReportStartDate,
+  reportEndDate,
+  setReportEndDate,
+  reportPeriod,
   downloadReport,
 }) {
-  const emergingIssue =
-    trends?.emerging_issue;
+  const emergingIssue = trends?.emerging_issue;
 
   return (
     <div className="page-container">
       <PageHeading
         eyebrow="EXECUTIVE INTELLIGENCE"
         title="Voice of Customer Report"
-        description="A management-ready snapshot of customer feedback intelligence."
+        description="Generate a focused customer intelligence report for a month or any custom date range."
         action={
           <button
             className="primary-button"
-            onClick={
-              downloadReport
-            }
+            onClick={downloadReport}
+            disabled={!reportPeriod.total}
           >
-            <Download
-              size={17}
-            />
-
+            <Download size={17} />
             Download Report
           </button>
         }
       />
 
+      <section className="report-period-card">
+        <div className="report-period-heading">
+          <div>
+            <span className="report-section-label">REPORT PERIOD</span>
+            <h3>Choose exactly what you want to download</h3>
+            <p>Select a month for a monthly report or choose your own start and end dates.</p>
+          </div>
+          <div className="report-period-count">
+            <strong>{reportPeriod.total}</strong>
+            <span>matching feedback</span>
+          </div>
+        </div>
+
+        <div className="report-period-tabs">
+          <button type="button" className={reportMode === "month" ? "report-period-tab active" : "report-period-tab"} onClick={() => setReportMode("month")}>Monthly Report</button>
+          <button type="button" className={reportMode === "custom" ? "report-period-tab active" : "report-period-tab"} onClick={() => setReportMode("custom")}>Custom Date Range</button>
+        </div>
+
+        {reportMode === "month" ? (
+          <div className="report-period-controls">
+            <label className="report-field">
+              <span>Select Month</span>
+              <select value={selectedReportMonth} onChange={(event) => setSelectedReportMonth(event.target.value)}>
+                {availableReportMonths.length ? availableReportMonths.map((month) => (
+                  <option key={month} value={month}>
+                    {new Date(Number(month.slice(0, 4)), Number(month.slice(5, 7)) - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" })}
+                  </option>
+                )) : <option value="">No months available</option>}
+              </select>
+            </label>
+            <div className="report-period-summary">
+              <span>Report period</span>
+              <strong>{reportPeriod.label}</strong>
+            </div>
+          </div>
+        ) : (
+          <div className="report-period-controls custom">
+            <label className="report-field">
+              <span>From Date</span>
+              <input type="date" value={reportStartDate} onChange={(event) => setReportStartDate(event.target.value)} />
+            </label>
+            <label className="report-field">
+              <span>To Date</span>
+              <input type="date" min={reportStartDate || undefined} value={reportEndDate} onChange={(event) => setReportEndDate(event.target.value)} />
+            </label>
+            <div className="report-period-summary">
+              <span>Report period</span>
+              <strong>{reportPeriod.label}</strong>
+            </div>
+          </div>
+        )}
+
+        {!reportPeriod.total && (
+          <div className="report-empty-state">
+            <FileText size={18} />
+            <span>No feedback records were found for this period. Choose another month or date range.</span>
+          </div>
+        )}
+      </section>
+
       <section className="report-preview">
         <div className="report-header">
           <div className="report-brand">
-            <div className="brand-mark small">
-              L
-            </div>
-
-            <div>
-              <strong>
-                LOOP AI
-              </strong>
-
-              <span>
-                Customer Intelligence
-                Platform
-              </span>
-            </div>
+            <div className="brand-mark small">L</div>
+            <div><strong>LOOP AI</strong><span>Customer Intelligence Platform</span></div>
           </div>
-
           <div className="report-date">
-            <span>
-              GENERATED
-            </span>
-
-            <strong>
-              {new Date().toLocaleDateString()}
-            </strong>
+            <span>REPORT PERIOD</span>
+            <strong>{reportPeriod.label}</strong>
           </div>
         </div>
 
         <div className="report-title">
-          <span>
-            VOICE OF CUSTOMER
-          </span>
-
-          <h2>
-            Customer Intelligence
-            Report
-          </h2>
-
-          <p>
-            AI-powered analysis of
-            customer feedback and
-            operational signals.
-          </p>
+          <span>VOICE OF CUSTOMER</span>
+          <h2>Customer Intelligence Report</h2>
+          <p>AI-powered analysis of customer feedback and operational signals for the selected period.</p>
         </div>
 
         <div className="report-kpi-grid">
-          <div>
-            <span>
-              Total Feedback
-            </span>
+          <div><span>Total Feedback</span><strong>{reportPeriod.total}</strong></div>
+          <div><span>Positive</span><strong>{reportPeriod.positivePercentage}%</strong></div>
+          <div><span>Negative</span><strong>{reportPeriod.negativePercentage}%</strong></div>
+          <div><span>Critical Issues</span><strong>{reportPeriod.critical}</strong></div>
+        </div>
 
-            <strong>
-              {totalFeedback}
-            </strong>
+        <div className="report-columns">
+          <div className="report-section">
+            <span className="report-section-label">PERIOD SUMMARY</span>
+            <p>{reportPeriod.total ? `${reportPeriod.total} feedback record(s) were received during ${reportPeriod.label}. ${reportPeriod.negative} were negative, ${reportPeriod.positive} were positive, and ${reportPeriod.neutral} were neutral.` : "No feedback is available for the selected period."}</p>
           </div>
-
-          <div>
-            <span>
-              Positive
-            </span>
-
-            <strong>
-              {stats?.positive_percentage ||
-                0}
-              %
-            </strong>
-          </div>
-
-          <div>
-            <span>
-              Negative
-            </span>
-
-            <strong>
-              {stats?.negative_percentage ||
-                0}
-              %
-            </strong>
-          </div>
-
-          <div>
-            <span>
-              Critical Issues
-            </span>
-
-            <strong>
-              {stats?.critical_issues ||
-                0}
-            </strong>
+          <div className="report-section">
+            <span className="report-section-label">TOP ISSUE</span>
+            <div className="report-highlight">
+              <AlertTriangle size={21} />
+              <div><strong>{reportPeriod.topIssue}</strong><span>{reportPeriod.topIssueCount} occurrence{reportPeriod.topIssueCount !== 1 ? "s" : ""}</span></div>
+            </div>
           </div>
         </div>
 
         <div className="report-columns">
           <div className="report-section">
-            <span className="report-section-label">
-              EXECUTIVE SUMMARY
-            </span>
-
-            <p>
-              {analytics?.summary ||
-                "No executive summary is available yet."}
-            </p>
-          </div>
-
-          <div className="report-section">
-            <span className="report-section-label">
-              TOP ISSUE
-            </span>
-
+            <span className="report-section-label">PERIOD COMPARISON</span>
             <div className="report-highlight">
-              <AlertTriangle
-                size={21}
-              />
-
+              <Activity size={21} />
               <div>
-                <strong>
-                  {topIssue}
-                </strong>
-
-                <span>
-                  {
-                    topIssueCount
-                  }{" "}
-                  occurrence
-                  {topIssueCount !==
-                  1
-                    ? "s"
-                    : ""}
-                </span>
+                <strong>{reportPeriod.changePercentage >= 0 ? `+${reportPeriod.changePercentage}%` : `${reportPeriod.changePercentage}%`}</strong>
+                <span>feedback compared with the previous period</span>
+              </div>
+            </div>
+          </div>
+          <div className="report-section">
+            <span className="report-section-label">TREND INTELLIGENCE</span>
+            <div className="report-highlight">
+              <TrendingUp size={21} />
+              <div>
+                <strong>{emergingIssue?.name || "No emerging issue"}</strong>
+                <span>{emergingIssue ? `${emergingIssue.recent_count || 0} recent occurrence(s) detected` : "LOOP AI is monitoring current feedback signals."}</span>
               </div>
             </div>
           </div>
         </div>
 
         <div className="report-section">
-          <span className="report-section-label">
-            TREND INTELLIGENCE
-          </span>
-
-          <div className="report-highlight">
-            <Activity
-              size={21}
-            />
-
-            <div>
-              <strong>
-                {emergingIssue?.name ||
-                  "No emerging issue"}
-              </strong>
-
-              <span>
-                {emergingIssue
-                  ? `${emergingIssue.recent_count || 0} recent occurrence(s)`
-                  : "LOOP AI is monitoring current feedback signals."}
-              </span>
-            </div>
-          </div>
+          <span className="report-section-label">RECOMMENDED FOCUS</span>
+          <div className="report-list-row"><CheckCircle2 size={17} /><span>Prioritize recurring critical customer issues from the selected period.</span></div>
+          <div className="report-list-row"><CheckCircle2 size={17} /><span>Investigate the evidence behind the highest-frequency complaints.</span></div>
+          <div className="report-list-row"><CheckCircle2 size={17} /><span>Compare future reporting periods to measure improvement.</span></div>
         </div>
 
-        <div className="report-section">
-          <span className="report-section-label">
-            RECOMMENDED FOCUS
-          </span>
-
-          <div className="report-list-row">
-            <CheckCircle2
-              size={17}
-            />
-
-            <span>
-              Prioritize recurring
-              critical customer
-              issues.
-            </span>
-          </div>
-
-          <div className="report-list-row">
-            <CheckCircle2
-              size={17}
-            />
-
-            <span>
-              Investigate the
-              evidence behind
-              high-frequency
-              complaints.
-            </span>
-          </div>
-
-          <div className="report-list-row">
-            <CheckCircle2
-              size={17}
-            />
-
-            <span>
-              Monitor future
-              feedback to measure
-              improvement.
-            </span>
-          </div>
-        </div>
-
-        <div className="report-footer">
-          LOOP AI • Customer
-          Feedback Intelligence
-          Platform
-        </div>
+        <div className="report-footer">LOOP AI • Customer Feedback Intelligence Platform</div>
       </section>
     </div>
   );

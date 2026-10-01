@@ -1,4 +1,5 @@
 import os
+
 from collections import Counter
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -44,16 +45,13 @@ app.include_router(auth_router)
 # CORS
 # ============================================================
 
-FRONTEND_URL = os.getenv("FRONTEND_URL", "")
-
-allowed_origins = [
+LOCAL_FRONTEND_ORIGINS = [
     "http://localhost:5173",
     "http://localhost:5174",
     "http://localhost:5175",
     "http://localhost:5176",
     "http://localhost:5177",
     "http://localhost:5178",
-
     "http://127.0.0.1:5173",
     "http://127.0.0.1:5174",
     "http://127.0.0.1:5175",
@@ -62,15 +60,17 @@ allowed_origins = [
     "http://127.0.0.1:5178",
 ]
 
-# Production frontend (Vercel). Several URLs can be separated by commas.
-for origin in FRONTEND_URL.split(","):
-    origin = origin.strip().rstrip("/")
-    if origin and origin not in allowed_origins:
-        allowed_origins.append(origin)
+configured_frontend_origins = [
+    origin.strip().rstrip("/")
+    for origin in os.getenv("FRONTEND_URL", "").split(",")
+    if origin.strip()
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
+    allow_origins=list(dict.fromkeys(
+        LOCAL_FRONTEND_ORIGINS + configured_frontend_origins
+    )),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -150,7 +150,7 @@ def health():
 # GET ALL FEEDBACK
 # ============================================================
 
-@app.get("/feedback", dependencies=[Depends(require_roles("Admin", "Manager", "Analyst"))])
+@app.get("/feedback", dependencies=[Depends(require_roles("Admin", "Manager", "Analyst", "Viewer"))])
 def get_feedback(
     db: Session = Depends(get_db)
 ):
@@ -185,6 +185,32 @@ def get_feedback(
 
         for item in feedback_list
     ]
+
+
+# ============================================================
+# DELETE FEEDBACK
+# ============================================================
+
+@app.delete("/feedback/{feedback_id}", dependencies=[Depends(require_roles("Admin", "Manager"))])
+def delete_feedback(
+    feedback_id: int,
+    db: Session = Depends(get_db),
+):
+    feedback_item = db.query(Feedback).filter(Feedback.id == feedback_id).first()
+
+    if feedback_item is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Feedback record not found.",
+        )
+
+    db.delete(feedback_item)
+    db.commit()
+
+    return {
+        "message": "Feedback deleted successfully.",
+        "deleted_id": feedback_id,
+    }
 
 
 # ============================================================
@@ -849,7 +875,7 @@ def reanalyze_feedback(
 # DASHBOARD STATISTICS
 # ============================================================
 
-@app.get("/dashboard/stats", dependencies=[Depends(require_roles("Admin", "Manager", "Analyst"))])
+@app.get("/dashboard/stats", dependencies=[Depends(require_roles("Admin", "Manager", "Analyst", "Viewer"))])
 def dashboard_stats(
     db: Session = Depends(get_db)
 ):
@@ -960,7 +986,7 @@ def dashboard_stats(
 # ANALYTICS
 # ============================================================
 
-@app.get("/analytics", dependencies=[Depends(require_roles("Admin", "Manager", "Analyst"))])
+@app.get("/analytics", dependencies=[Depends(require_roles("Admin", "Manager", "Analyst", "Viewer"))])
 def analytics(
     db: Session = Depends(get_db)
 ):
@@ -1428,7 +1454,7 @@ def build_count_trend(
     )
 
 
-@app.get("/trends", dependencies=[Depends(require_roles("Admin", "Manager", "Analyst"))])
+@app.get("/trends", dependencies=[Depends(require_roles("Admin", "Manager", "Analyst", "Viewer"))])
 def trends(
     db: Session = Depends(get_db)
 ):
@@ -1769,7 +1795,7 @@ def trends(
 # ISSUE COMMAND CENTER
 # ============================================================
 
-@app.get("/issues", dependencies=[Depends(require_roles("Admin", "Manager", "Analyst"))])
+@app.get("/issues", dependencies=[Depends(require_roles("Admin", "Manager", "Analyst", "Viewer"))])
 def get_issues(
     db: Session = Depends(get_db)
 ):
@@ -2258,7 +2284,7 @@ def build_topic_recommendations(
 # AI COPILOT
 # ============================================================
 
-@app.post("/copilot", dependencies=[Depends(require_roles("Admin", "Manager", "Analyst"))])
+@app.post("/copilot", dependencies=[Depends(require_roles("Admin", "Manager", "Analyst", "Viewer"))])
 def copilot(
     request: CopilotRequest,
     db: Session = Depends(get_db)
