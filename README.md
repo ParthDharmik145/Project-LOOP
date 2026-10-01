@@ -6,6 +6,9 @@ LOOP AI is an AI-powered customer feedback intelligence platform that
 helps organizations collect, analyze, prioritize, and act on customer
 feedback from a centralized SaaS-style dashboard.
 
+🔗 **[Live Demo](https://project-loop-amber.vercel.app/)** ·
+💻 **[GitHub Repository](https://github.com/ParthDharmik145/Project-LOOP)**
+
 ## 🚀 Project Overview
 
 Customer feedback is often scattered across different channels and
@@ -22,6 +25,23 @@ where teams can:
 -   Generate period-specific intelligence reports
 -   Import feedback through CSV/Excel
 -   Manage access with role-based permissions
+
+## 🌐 Live Demo
+
+🔗 **Live Application:** https://project-loop-amber.vercel.app/
+
+The deployed application can be opened directly in a browser for demonstration and evaluation.
+
+### 🔐 Demo Access
+
+A dedicated **Viewer Demo Login** is available for evaluation.
+
+- **Email:** `demo.viewer@loopai.com`
+- **Role:** `Viewer`
+- **Password:** Not required for the public Viewer demo
+- **Access:** Read-only application access
+
+> **Security note:** Administrative, Manager, Analyst, database, and production credentials are intentionally not published in this repository.
 
 ## 💡 Why LOOP?
 
@@ -456,11 +476,6 @@ Backend   → Render
 Database  → Aiven MySQL
 Source    → GitHub
 ```
-
-### Live Application
-
-**LOOP AI:**\
-https://project-loop-amber.vercel.app/
 
 ## 🔭 Future Enhancements
 
